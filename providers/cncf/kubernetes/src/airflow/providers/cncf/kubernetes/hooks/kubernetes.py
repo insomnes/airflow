@@ -522,7 +522,6 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
             self.log.debug("Job Creation Response: %s", resp)
         except Exception as e:
             self.log.exception(
-                "Exception when attempting to create Namespaced Job: %s", str(json_job).replace("\n", " ")
             )
             raise e
         return resp
@@ -819,6 +818,11 @@ class AsyncKubernetesHook(KubernetesHook):
             if kube_client is not None:
                 await kube_client.close()
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_random_exponential(),
+        reraise=True,
+    )
     async def get_pod(self, name: str, namespace: str) -> V1Pod:
         """
         Get pod's object.
@@ -841,17 +845,29 @@ class AsyncKubernetesHook(KubernetesHook):
         :param name: Name of the pod.
         :param namespace: Name of the pod's namespace.
         """
-        async with self.get_conn() as connection:
-            try:
-                v1_api = async_client.CoreV1Api(connection)
-                await v1_api.delete_namespaced_pod(
-                    name=name, namespace=namespace, body=client.V1DeleteOptions()
-                )
-            except async_client.ApiException as e:
-                # If the pod is already deleted
-                if str(e.status) != "404":
-                    raise
+        for cc in range(3):
+            async with self.get_conn() as connection:
+                try:
+                    v1_api = async_client.CoreV1Api(connection)
+                    await v1_api.delete_namespaced_pod(
+                        name=name, namespace=namespace, body=client.V1DeleteOptions()
+                    )
+                except async_client.ApiException as e:
+                    print(f"Exception when calling CoreV1Api->delete_namespaced_pod: {e}")
+                    print(f"Try {cc + 1} of 3, status: {e.status}")
+                    if cc > 2:
+                        raise
+                    # If the pod is already deleted
+                    if str(e.status) == "404":
+                        break
+                else:
+                    break
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_random_exponential(),
+        reraise=True,
+    )
     async def read_logs(self, name: str, namespace: str):
         """
         Read logs inside the pod while starting containers inside.
@@ -881,6 +897,11 @@ class AsyncKubernetesHook(KubernetesHook):
                 self.log.exception("There was an error reading the kubernetes API.")
                 raise
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_random_exponential(),
+        reraise=True,
+    )
     async def get_job_status(self, name: str, namespace: str) -> V1Job:
         """
         Get job's status object.

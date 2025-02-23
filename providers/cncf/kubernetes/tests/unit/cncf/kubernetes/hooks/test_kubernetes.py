@@ -31,6 +31,7 @@ import yaml
 from kubernetes.client import V1Deployment, V1DeploymentStatus
 from kubernetes.client.rest import ApiException
 from kubernetes.config import ConfigException
+from kubernetes_asyncio.client.exceptions import ApiException as AsyncApiException
 from sqlalchemy.orm import make_transient
 
 from airflow.exceptions import AirflowException, AirflowNotFoundException
@@ -826,6 +827,12 @@ class TestAsyncKubernetesHook:
         f.set_result(return_value)
         return f
 
+    @staticmethod
+    def mock_exception(exception):
+        f = Future()
+        f.set_exception(exception)
+        return f
+
     @pytest.fixture
     def kube_config_loader(self):
         with mock.patch(self.KUBE_LOADER_CONFIG) as kube_config_loader:
@@ -1008,6 +1015,47 @@ class TestAsyncKubernetesHook:
         )
 
         lib_method.assert_called_once()
+
+    @pytest.mark.asyncio
+    @mock.patch(KUBE_API.format("delete_namespaced_pod"))
+    async def test_delete_pod_retries(self, lib_method, kube_config_loader):
+        # lib_method.return_value = self.mock_exception(AsyncApiException(status=500))
+        lib_method.side_effect = [
+            self.mock_exception(AsyncApiException(status=500)),
+            self.mock_exception(AsyncApiException(status=500)),
+            self.mock_exception(AsyncApiException(status=500)),
+        ]
+        hook = AsyncKubernetesHook(
+            conn_id=None,
+            in_cluster=False,
+            config_file=None,
+            cluster_context=None,
+        )
+
+        await hook.delete_pod(
+            name=POD_NAME,
+            namespace=NAMESPACE,
+        )
+        # Check if it retries 3 times
+        assert lib_method.call_count == 3
+
+    @pytest.mark.asyncio
+    @mock.patch(KUBE_API.format("delete_namespaced_pod"))
+    async def test_delete_pod_no_404_retries(self, lib_method, kube_config_loader):
+        lib_method.return_value = self.mock_exception(AsyncApiException(status=404))
+
+        hook = AsyncKubernetesHook(
+            conn_id=None,
+            in_cluster=False,
+            config_file=None,
+            cluster_context=None,
+        )
+        await hook.delete_pod(
+            name=POD_NAME,
+            namespace=NAMESPACE,
+        )
+        assert lib_method.assert_called_once()
+
 
     @pytest.mark.asyncio
     @mock.patch(KUBE_API.format("read_namespaced_pod_log"))
